@@ -5,8 +5,10 @@ import (
 	"log"
 	"net/http"
 	"strconv"
+	"sync"
 	"time"
 
+	"github.com/chromedp/cdproto/network"
 	"github.com/chromedp/chromedp"
 )
 
@@ -47,6 +49,9 @@ func screenshotHandler(w http.ResponseWriter, r *http.Request) {
 	// determining whether to capture full page or just viewport
 	fullPage := r.URL.Query().Get("fullpage") == "true"
 
+	// determining whether to wait for network idle
+	waitNetworkIdle := r.URL.Query().Get("networkidle") == "true"
+
 	// creating a new chrome context with custom viewport size
 	opts := append(chromedp.DefaultExecAllocatorOptions[:],
 		chromedp.WindowSize(width, height),
@@ -58,23 +63,41 @@ func screenshotHandler(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 
 	// setting a timeout to prevent requests from hanging indefinitely
-	ctx, cancel = context.WithTimeout(ctx, 15*time.Second)
+	ctx, cancel = context.WithTimeout(ctx, 30*time.Second) // increased timeout for network waiting
 	defer cancel()
 
-	// navigating to the url and capturing screenshot based on fullPage setting
+	// navigating to the url and capturing screenshot based on settings
 	var buf []byte
 	var err error
 
-	if fullPage {
-		err = chromedp.Run(ctx,
-			chromedp.Navigate(url),
-			chromedp.FullScreenshot(&buf, 90), // capturing entire page height
-		)
+	if waitNetworkIdle {
+		if fullPage {
+			err = chromedp.Run(ctx,
+				network.Enable(),
+				chromedp.Navigate(url),
+				waitForNetworkIdle(500*time.Millisecond, 2*time.Second),
+				chromedp.FullScreenshot(&buf, 90),
+			)
+		} else {
+			err = chromedp.Run(ctx,
+				network.Enable(),
+				chromedp.Navigate(url),
+				waitForNetworkIdle(500*time.Millisecond, 2*time.Second),
+				chromedp.CaptureScreenshot(&buf),
+			)
+		}
 	} else {
-		err = chromedp.Run(ctx,
-			chromedp.Navigate(url),
-			chromedp.CaptureScreenshot(&buf), // capturing viewport only
-		)
+		if fullPage {
+			err = chromedp.Run(ctx,
+				chromedp.Navigate(url),
+				chromedp.FullScreenshot(&buf, 90),
+			)
+		} else {
+			err = chromedp.Run(ctx,
+				chromedp.Navigate(url),
+				chromedp.CaptureScreenshot(&buf),
+			)
+		}
 	}
 
 	if err != nil {
@@ -85,6 +108,59 @@ func screenshotHandler(w http.ResponseWriter, r *http.Request) {
 	// returning the screenshot as a png image to the client
 	w.Header().Set("Content-Type", "image/png")
 	w.Write(buf)
+}
+
+// waitForNetworkIdle creates a custom action that waits for network activity to settle
+func waitForNetworkIdle(idleDuration, maxWait time.Duration) chromedp.Action {
+	return chromedp.ActionFunc(func(ctx context.Context) error {
+		var activeRequests int
+		var mu sync.Mutex
+		var lastActivity time.Time
+
+		mu.Lock()
+		lastActivity = time.Now()
+		mu.Unlock()
+
+		// listening for network events
+		chromedp.ListenTarget(ctx, func(ev interface{}) {
+			mu.Lock()
+			defer mu.Unlock()
+
+			switch ev.(type) {
+			case *network.EventRequestWillBeSent:
+				activeRequests++
+				lastActivity = time.Now()
+			case *network.EventLoadingFinished, *network.EventLoadingFailed:
+				if activeRequests > 0 {
+					activeRequests--
+				}
+				lastActivity = time.Now()
+			}
+		})
+
+		// waiting for network to be idle
+		start := time.Now()
+		for {
+			mu.Lock()
+			currentActiveRequests := activeRequests
+			timeSinceLastActivity := time.Since(lastActivity)
+			mu.Unlock()
+
+			// checking if network has been idle for the required duration
+			if currentActiveRequests <= 2 && timeSinceLastActivity >= idleDuration {
+				break
+			}
+
+			// checking if we've exceeded maximum wait time
+			if time.Since(start) >= maxWait {
+				break
+			}
+
+			time.Sleep(50 * time.Millisecond)
+		}
+
+		return nil
+	})
 }
 
 // parseResolution parses width and height from query parameters with validation
