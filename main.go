@@ -28,9 +28,9 @@ func main() {
 	screenshotHandlerFunc := http.HandlerFunc(screenshotHandler)
 	mux.Handle("/screenshot", corsMiddleware(screenshotHandlerFunc))
 
-	// starting the http server on port 8080 to listen for requests
-	log.Println("Starting server on :8080")
-	if err := http.ListenAndServe(":8080", mux); err != nil {
+	// starting the http server on port 8083 to listen for requests
+	log.Println("Starting server on :8083")
+	if err := http.ListenAndServe(":8083", mux); err != nil {
 		log.Fatal(err)
 	}
 }
